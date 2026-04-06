@@ -1,5 +1,6 @@
 import Cocoa
 import CoreGraphics
+import Carbon
 
 // MARK: - GlobalHotkeyListener
 //
@@ -10,7 +11,12 @@ import CoreGraphics
 //
 // Re-entrancy guard: `isSwapping` boolean prevents double-swaps on rapid F9 taps.
 // The swap pipeline owns a 500ms SLA timeout (Design Change 3).
+//
+// Threading: The event tap is added to the main run loop, so the callback
+// runs on the main thread. All methods are @MainActor. The C callback bridge
+// uses MainActor.assumeIsolated to enter the actor synchronously.
 
+@MainActor
 final class GlobalHotkeyListener {
 
     private static let f9KeyCode: Int64 = 100
@@ -23,7 +29,7 @@ final class GlobalHotkeyListener {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    // Re-entrancy guard — set true at swap entry, cleared by defer in the pipeline.
+    // Re-entrancy guard — set true at swap entry, cleared by the pipeline.
     private(set) var isSwapping: Bool = false
 
     // MARK: - Tap lifecycle
@@ -61,7 +67,7 @@ final class GlobalHotkeyListener {
 
         guard let tap else {
             // Tap creation failed → DEGRADED
-            Task { @MainActor in appState?.markDegraded() }
+            appState?.markDegraded()
             return
         }
 
@@ -70,49 +76,40 @@ final class GlobalHotkeyListener {
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
-        // Start health-check monitor (ACTIVE / DEGRADED detection)
         startTapHealthMonitor()
     }
 
     // MARK: - Health monitor (DEGRADED detection)
 
     private func startTapHealthMonitor() {
-        Task {
+        Task { @MainActor in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000) // check every 5s
-                await checkTapHealth()
+                try? await Task.sleep(nanoseconds: 5_000_000_000) // every 5s
+                guard let tap = eventTap else { return }
+                if CGEvent.tapIsEnabled(tap: tap) {
+                    appState?.markActive()
+                } else {
+                    appState?.markDegraded()
+                    startDegradedRecovery()
+                }
             }
-        }
-    }
-
-    @MainActor
-    private func checkTapHealth() {
-        guard let tap = eventTap else { return }
-        if CGEvent.tapIsEnabled(tap: tap) {
-            appState?.markActive()
-        } else {
-            appState?.markDegraded()
-            startDegradedRecovery()
         }
     }
 
     // MARK: - DEGRADED recovery (30-second retry loop)
 
     private func startDegradedRecovery() {
-        Task {
-            var attempts = 0
-            while attempts < 30 && !Task.isCancelled {
+        Task { @MainActor in
+            for _ in 0..<30 {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                attempts += 1
                 if let tap = eventTap {
                     CGEvent.tapEnable(tap: tap, enable: true)
                     if CGEvent.tapIsEnabled(tap: tap) {
-                        await MainActor.run { appState?.markActive() }
+                        appState?.markActive()
                         return
                     }
                 } else {
-                    // Tap was destroyed — recreate
-                    await MainActor.run { createTap() }
+                    createTap()
                     return
                 }
             }
@@ -122,7 +119,8 @@ final class GlobalHotkeyListener {
 
     // MARK: - Event handling
 
-    // Called from the C callback. Runs on the main thread (session tap).
+    // Called from the C callback via MainActor.assumeIsolated.
+    // The tap is registered on the main run loop, so the callback is always on the main thread.
     func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> CGEvent? {
         // SECURITY GATE: return immediately for non-keyDown events
         guard type == .keyDown else { return event }
@@ -133,8 +131,7 @@ final class GlobalHotkeyListener {
             return event // pass through immediately, zero side effects
         }
 
-        // Only F9 / Shift+F9 reaches here.
-        // Consume the event (return nil) to prevent it from reaching other apps.
+        // Only F9 / Shift+F9 reaches here. Consume the event.
         handleF9()
         return nil
     }
@@ -169,6 +166,10 @@ final class GlobalHotkeyListener {
 }
 
 // MARK: - C-compatible callback
+//
+// This function has no actor annotation (required by C callback type).
+// MainActor.assumeIsolated is safe because the tap is installed on the main run loop,
+// guaranteeing the callback is always invoked on the main thread.
 
 private func globalHotkeyCallback(
     proxy: CGEventTapProxy,
@@ -177,9 +178,12 @@ private func globalHotkeyCallback(
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     guard let refcon else { return Unmanaged.passRetained(event) }
-    let listener = Unmanaged<GlobalHotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
-    if let result = listener.handleEvent(proxy: proxy, type: type, event: event) {
-        return Unmanaged.passRetained(result)
+
+    return MainActor.assumeIsolated {
+        let listener = Unmanaged<GlobalHotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
+        if let result = listener.handleEvent(proxy: proxy, type: type, event: event) {
+            return Unmanaged.passRetained(result)
+        }
+        return nil // consumed
     }
-    return nil // consumed
 }

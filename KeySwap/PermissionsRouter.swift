@@ -15,6 +15,7 @@ import ApplicationServices
 //  4. If window closed without granting both: AppState stays PERMISSIONS_REQUIRED
 //  5. If both granted: AppState → ACTIVE, window closes
 
+@MainActor
 final class PermissionsRouter: NSObject, NSWindowDelegate {
 
     private weak var appState: AppState?

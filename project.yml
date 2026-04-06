@@ -1,0 +1,39 @@
+name: KeySwap
+options:
+  bundleIdPrefix: com.ersegev
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+packages:
+  TranslationContext:
+    path: TranslationContext
+
+targets:
+  KeySwap:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+
+    sources:
+      - path: KeySwap
+        excludes:
+          - "*.plist"
+          - "*.entitlements"
+
+    dependencies:
+      - package: TranslationContext
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ersegev.KeySwap
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
+        INFOPLIST_FILE: KeySwap/Info.plist
+        CODE_SIGN_ENTITLEMENTS: KeySwap/KeySwap.entitlements
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+        ENABLE_HARDENED_RUNTIME: YES
+        # Info.plist is provided as a file; do not auto-generate
+        GENERATE_INFOPLIST_FILE: NO

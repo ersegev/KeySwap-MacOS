@@ -5,6 +5,7 @@ import TranslationContext
 // MARK: - Entry Point
 
 @main
+@MainActor
 final class KeySwapApp: NSObject, NSApplicationDelegate {
 
     // MARK: - Components
