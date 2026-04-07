@@ -85,14 +85,14 @@ struct CapitalizationTests {
         // Build input that translates to "hello. world" and confirm 'w' is capitalized.
         // Key insight: '.' in English → 'ץ' in Hebrew (englishToHebrew["."]=ץ),
         // so to get a '.' in English output we need 'ץ' in the Hebrew input.
-        // h→י, e→ק, l→ך, l→ך, o→ם, ץ→., space passes through, w→', o→ם, r→ר, l→ך, d→ג
-        let input = "יקךךםץ 'םרךג"
+        // h→י, e→ק, l→ך, l→ך, o→ם, ץ→., space passes through, w→׳ (U+05F3), o→ם, r→ר, l→ך, d→ג
+        let input = "יקךךםץ ׳םרךג"
         #expect(tc.translate(input, to: .english) == "hello. World")
     }
 
     @Test("Rule 2 + Rule 3 both fire when fallbackMacroUsed=true")
     func rule2And3Interaction() {
-        let input = "יקךךםץ 'םרךג"
+        let input = "יקךךםץ ׳םרךג"
         #expect(tc.translate(input, to: .english, fallbackMacroUsed: true) == "Hello. World")
     }
 
@@ -101,6 +101,64 @@ struct CapitalizationTests {
         // h→י, e→ק, l→ך, l→ך, o→ם
         let result = tc.translate("hello", to: .hebrew, fallbackMacroUsed: true)
         #expect(result == "יקךךם")
+    }
+}
+
+// MARK: - Shifted-key mapping tests
+
+@Suite("Shifted Key Mappings")
+struct ShiftedKeyTests {
+    let tc = TranslationContext()
+
+    @Test("Ampersand ↔ Shekel sign round-trip")
+    func ampersandShekel() {
+        #expect(tc.translate("&", to: .hebrew) == "₪")
+        #expect(tc.translate("₪", to: .english) == "&")
+    }
+
+    @Test("Double-quote ↔ Hebrew double geresh round-trip")
+    func doubleQuoteGeresh() {
+        #expect(tc.translate("\"", to: .hebrew) == "״")
+        #expect(tc.translate("״", to: .english) == "\"")
+    }
+
+    @Test("Parentheses are swapped")
+    func parenthesesSwap() {
+        #expect(tc.translate("(", to: .hebrew) == ")")
+        #expect(tc.translate(")", to: .hebrew) == "(")
+        #expect(tc.translate(")", to: .english) == "(")
+        #expect(tc.translate("(", to: .english) == ")")
+    }
+
+    @Test("Angle brackets are swapped")
+    func angleBracketsSwap() {
+        #expect(tc.translate("<", to: .hebrew) == ">")
+        #expect(tc.translate(">", to: .hebrew) == "<")
+        #expect(tc.translate(">", to: .english) == "<")
+        #expect(tc.translate("<", to: .english) == ">")
+    }
+
+    @Test("Curly braces are swapped")
+    func curlyBracesSwap() {
+        #expect(tc.translate("{", to: .hebrew) == "}")
+        #expect(tc.translate("}", to: .hebrew) == "{")
+        #expect(tc.translate("}", to: .english) == "{")
+        #expect(tc.translate("{", to: .english) == "}")
+    }
+
+    @Test("Shifted keys that are identical pass through unchanged")
+    func identicalShiftedKeys() {
+        // These produce the same output on both layouts
+        #expect(tc.translate("!@#$%^*+_:|?", to: .hebrew) == "!@#$%^*+_:|?")
+        #expect(tc.translate("!@#$%^*+_:|?", to: .english) == "!@#$%^*+_:|?")
+    }
+
+    @Test("Round-trip shifted-key string preserves original")
+    func shiftedRoundTrip() {
+        let original = "&\"(){}<>"
+        let toHebrew = tc.translate(original, to: .hebrew)
+        let backToEnglish = tc.translate(toHebrew, to: .english)
+        #expect(backToEnglish == original)
     }
 }
 

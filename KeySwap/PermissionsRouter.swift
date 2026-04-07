@@ -20,7 +20,11 @@ final class PermissionsRouter: NSObject, NSWindowDelegate {
 
     private weak var appState: AppState?
     private var window: NSWindow?
-    private var pollingTask: Task<Void, Never>?
+    private var axPollingTask: Task<Void, Never>?
+    private var imPollingTask: Task<Void, Never>?
+
+    /// Callback invoked when both permissions are granted and the listener should start.
+    var onBothGranted: (() -> Void)?
 
     init(appState: AppState) {
         self.appState = appState
@@ -101,45 +105,108 @@ final class PermissionsRouter: NSObject, NSWindowDelegate {
         container.addSubview(note)
 
         container.frame = NSRect(x: 0, y: 0, width: 480, height: 340)
+
+        // Show current state for permissions already granted.
+        // Set directly on the labels — self.window isn't assigned yet,
+        // so updateStatus(tag:) can't find them via viewWithTag.
+        if AXIsProcessTrusted() {
+            axStatus.stringValue = "✓ Granted"
+            axStatus.textColor = .systemGreen
+        }
+        if GlobalHotkeyListener.probeInputMonitoring() {
+            imStatus.stringValue = "✓ Granted"
+            imStatus.textColor = .systemGreen
+        }
+
         return container
     }
 
     // MARK: - Button actions
 
     @objc private func grantAccessibility() {
-        if AXIsProcessTrusted() {
+        // AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt:
+        // - Returns true immediately if already trusted
+        // - If not trusted, shows the native macOS dialog that opens System Settings
+        //   with this app pre-selected, then returns false
+        // This is the Apple-recommended approach — it correctly associates the
+        // permission with the current binary (important for Xcode debug builds
+        // which get a new signature each build).
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(options)
+
+        if trusted {
             updateStatus(tag: 100, text: "✓ Granted", color: .systemGreen)
-            Task { @MainActor in appState?.updateAccessibility(true) }
+            appState?.updateAccessibility(true)
+            checkIfComplete()
         } else {
-            // Open System Settings → Privacy → Accessibility
-            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-            NSWorkspace.shared.open(url)
             updateStatus(tag: 100, text: "Waiting...", color: .secondaryLabelColor)
             startPollingAccessibility()
         }
     }
 
     @objc private func grantInputMonitoring() {
-        // Design Change 7 (VERIFY ON MAC): IOHIDRequestAccess may not be a reliable public API.
-        // Attempt it; if it doesn't trigger the system dialog, fall through to manual instructions.
-        //
-        // TODO (TODOS.md): Verify IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) on actual Mac.
-        // If unreliable, change this button to open System Settings → Input Monitoring directly.
+        // IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) is the Apple API for Input Monitoring.
+        // It triggers the system prompt dialog on first call, and registers the app in
+        // System Settings → Input Monitoring. Not bridged to Swift, so we call via dlsym.
+        let granted = Self.requestInputMonitoring()
+        #if DEBUG
+        print("[PermissionsRouter] IOHIDRequestAccess returned: \(granted)")
+        #endif
 
+        if granted {
+            updateStatus(tag: 101, text: "✓ Granted", color: .systemGreen)
+            appState?.updateInputMonitoring(true)
+            checkIfComplete()
+            return
+        }
+
+        // IOHIDRequestAccess should have shown the system prompt or registered the app.
+        // Also open System Settings as a fallback in case the prompt didn't appear.
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!
         NSWorkspace.shared.open(url)
-        updateStatus(tag: 101, text: "Grant in System Settings", color: .secondaryLabelColor)
+        updateStatus(tag: 101, text: "Enable in System Settings, then wait...", color: .secondaryLabelColor)
+        startPollingInputMonitoring()
+    }
+
+    // MARK: - IOHIDRequestAccess bridge
+
+    private typealias IOHIDRequestAccessFunc = @convention(c) (UInt32) -> Bool
+
+    /// Resolved once; the symbol lives in IOKit which is always loaded.
+    private static let ioHIDRequestAccess: IOHIDRequestAccessFunc? = {
+        guard let handle = dlopen(nil, RTLD_NOW),
+              let sym = dlsym(handle, "IOHIDRequestAccess") else {
+            return nil
+        }
+        return unsafeBitCast(sym, to: IOHIDRequestAccessFunc.self)
+    }()
+
+    /// Calls IOHIDRequestAccess(kIOHIDRequestTypeListenEvent).
+    /// Returns true if Input Monitoring is already granted.
+    /// On first call, triggers the macOS system prompt to grant access.
+    static func requestInputMonitoring() -> Bool {
+        guard let fn = ioHIDRequestAccess else { return false }
+        let kIOHIDRequestTypeListenEvent: UInt32 = 1
+        return fn(kIOHIDRequestTypeListenEvent)
     }
 
     // MARK: - Polling
 
     private func startPollingAccessibility() {
-        pollingTask?.cancel()
-        pollingTask = Task { @MainActor [weak self] in
+        axPollingTask?.cancel()
+        axPollingTask = Task { @MainActor [weak self] in
+            var pollCount = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self else { return }
-                if AXIsProcessTrusted() {
+                pollCount += 1
+                let trusted = AXIsProcessTrusted()
+                #if DEBUG
+                let bundleID = Bundle.main.bundleIdentifier ?? "nil"
+                let execPath = Bundle.main.executablePath ?? "nil"
+                print("[PermissionsRouter] AX poll #\(pollCount): trusted=\(trusted), bundleID=\(bundleID), exec=\(execPath)")
+                #endif
+                if trusted {
                     self.appState?.updateAccessibility(true)
                     self.updateStatus(tag: 100, text: "✓ Granted", color: .systemGreen)
                     self.checkIfComplete()
@@ -149,17 +216,41 @@ final class PermissionsRouter: NSObject, NSWindowDelegate {
         }
     }
 
-    private func checkIfComplete() {
-        guard let appState else { return }
-        if appState.current == .active {
-            window?.close()
+    private func startPollingInputMonitoring() {
+        imPollingTask?.cancel()
+        imPollingTask = Task { @MainActor [weak self] in
+            var pollCount = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self else { return }
+                pollCount += 1
+                let granted = Self.requestInputMonitoring()
+                #if DEBUG
+                print("[PermissionsRouter] IM poll #\(pollCount): granted=\(granted)")
+                #endif
+                if granted {
+                    self.appState?.updateInputMonitoring(true)
+                    self.updateStatus(tag: 101, text: "✓ Granted", color: .systemGreen)
+                    self.checkIfComplete()
+                    return
+                }
+            }
         }
+    }
+
+    private func checkIfComplete() {
+        guard let appState, appState.current == .active else { return }
+        // Fire once, then clear so the listener isn't started twice.
+        onBothGranted?()
+        onBothGranted = nil
+        window?.close()
     }
 
     // MARK: - NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
-        pollingTask?.cancel()
+        axPollingTask?.cancel()
+        imPollingTask?.cancel()
         window = nil
     }
 
@@ -181,10 +272,8 @@ final class PermissionsRouter: NSObject, NSWindowDelegate {
     }
 
     private func updateStatus(tag: Int, text: String, color: NSColor) {
-        DispatchQueue.main.async { [weak self] in
-            guard let field = self?.window?.contentView?.viewWithTag(tag) as? NSTextField else { return }
-            field.stringValue = text
-            field.textColor = color
-        }
+        guard let field = window?.contentView?.viewWithTag(tag) as? NSTextField else { return }
+        field.stringValue = text
+        field.textColor = color
     }
 }

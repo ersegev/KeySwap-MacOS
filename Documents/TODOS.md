@@ -4,9 +4,9 @@ Items deferred during CEO review (2026-04-02). Not in MVP scope.
 
 ## P1 — Before Phase 1 Merge
 
-- [ ] **Shifted-key mapping verification:** Verify Shift+number row (!, @, #, $, %, ^, &, *, (, )) and Shift+punctuation against the actual macOS "Hebrew" keyboard layout. Add verified mappings to TranslationContext's character table. Currently unshifted-only, unmapped chars pass through unchanged. Needs Mac hardware.
+- [x] **Shifted-key mapping verification:** Verified via UCKeyTranslate against the macOS "Hebrew" layout (no Mac hardware needed — parsed from system bundle). Fixed `w→׳` (U+05F3, was wrong U+0027), fixed `\→ֿ` (U+05BF), added 8 shifted mappings: `&↔₪`, `"↔״`, `(↔)`, `)↔(`, `<↔>`, `>↔<`, `{↔}`, `}↔{`.
 
-- [ ] **Verify IOHIDRequestAccess availability:** Test `IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)` on macOS. If this API doesn't work as expected (some sources indicate Input Monitoring is implicitly triggered by CGEventTap creation), redesign the PermissionsRouter onboarding flow to explain that the system dialog appears when the app first tries to monitor keys.
+- [x] **Verify IOHIDRequestAccess availability:** Dual approach implemented. Startup uses a non-prompting `CGEventTap.tapCreate` probe to check IM status without triggering a system dialog. The onboarding button uses `IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)` via dlsym to trigger the macOS system prompt. Both paths poll until granted.
 
 ## P1 — Eng Review Design Changes
 
@@ -14,6 +14,10 @@ Items deferred during CEO review (2026-04-02). Not in MVP scope.
   - PRD: Change "NSPasteboardItem pointer" clipboard preservation to eager `dataForType:` copy
   - Architecture Doc: Change `NSEvent.addGlobalMonitorForEvents` to `CGEventTap`; update AppState enum to include PARTIAL and DEGRADED states; fix clipboard approach
   - Blueprint: Update clipboard approach, add Shift+F9, visual flash, About window, re-entrancy guard, DEGRADED state to testing section
+
+## P1 — Known Bugs
+
+- [ ] **Shift+letter dropped on Hebrew layout (lost capitals):** When a user types on the Hebrew layout intending English, Shift+letter keystrokes (e.g., Shift+H for capital "H") produce no output — macOS swallows them because Hebrew letters have no case distinction and the Shift+letter combination has no assigned output for most keys. By the time KeySwap reads the text to swap, those characters are entirely missing from the input (not lowercased — *gone*). This cannot be fixed in the translation layer; the information is lost before we see it. Proposed fix: in the CGEventTap callback, detect Shift+letter keyDown events while the Hebrew layout is active and strip the `.maskShift` flag before passing the event through, so the unshifted Hebrew character is produced instead of nothing. Only strip Shift for letter keycodes (a-z), not numbers/punctuation, since Shift+number/punctuation keys DO produce valid distinct output on Hebrew (e.g., Shift+7→₪).
 
 ## P2 — Post-MVP
 

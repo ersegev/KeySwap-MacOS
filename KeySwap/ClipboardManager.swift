@@ -68,6 +68,33 @@ final class ClipboardManager {
         }
     }
 
+    // MARK: - Clipboard-only paste (no AX verification)
+
+    /// For apps where AX is unavailable (Electron etc.).
+    /// Stashes clipboard, writes translated text, sends Cmd+V, waits briefly, then restores.
+    func pasteWithoutAXVerification(
+        translatedText: String,
+        onComplete: @escaping () -> Void
+    ) {
+        let snapshot = stashClipboard()
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(translatedText, forType: .string)
+
+        // Brief delay to ensure clipboard write lands
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(20)) { [weak self] in
+            guard let self else { return }
+            self.sendCmdV()
+
+            // Wait a bit for the paste to land, then restore clipboard
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100)) {
+                self.restoreAndZero(snapshot)
+                onComplete()
+            }
+        }
+    }
+
     // MARK: - Stash
 
     private func stashClipboard() -> ClipboardSnapshot {

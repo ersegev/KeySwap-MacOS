@@ -19,7 +19,7 @@ import Carbon
 @MainActor
 final class GlobalHotkeyListener {
 
-    private static let f9KeyCode: Int64 = 100
+    private static let f9KeyCode: Int64 = Int64(kVK_F9) // 0x65 = 101
 
     weak var appState: AppState?
 
@@ -35,7 +35,15 @@ final class GlobalHotkeyListener {
     // MARK: - Tap lifecycle
 
     func start() {
-        guard eventTap == nil else { return }
+        guard eventTap == nil else {
+            #if DEBUG
+            print("[HotkeyListener] start() called but tap already exists — no-op")
+            #endif
+            return
+        }
+        #if DEBUG
+        print("[HotkeyListener] start() — creating event tap...")
+        #endif
         createTap()
     }
 
@@ -66,17 +74,49 @@ final class GlobalHotkeyListener {
         )
 
         guard let tap else {
-            // Tap creation failed → DEGRADED
-            appState?.markDegraded()
+            // Tap creation failed — Input Monitoring is not granted.
+            // Only mark DEGRADED if we were previously running (tap died).
+            // Otherwise this is a permissions issue handled by AppState.
+            #if DEBUG
+            print("[HotkeyListener] ✗ CGEventTap creation FAILED — Input Monitoring not granted?")
+            #endif
+            let wasRunning = appState?.current == .active || appState?.current == .degraded
+            appState?.updateInputMonitoring(false)
+            if wasRunning {
+                appState?.markDegraded()
+            }
             return
         }
 
+        // Tap created successfully — Input Monitoring is granted.
+        #if DEBUG
+        print("[HotkeyListener] ✓ CGEventTap created successfully, tap enabled on main run loop")
+        #endif
+        appState?.updateInputMonitoring(true)
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
         startTapHealthMonitor()
+    }
+
+    /// Attempts to create and immediately destroy a CGEventTap.
+    /// Returns true if Input Monitoring is granted. Requires Accessibility first.
+    static func probeInputMonitoring() -> Bool {
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, _, event, _ in Unmanaged.passUnretained(event) },
+            userInfo: nil
+        )
+        guard let tap else { return false }
+        CGEvent.tapEnable(tap: tap, enable: false)
+        CFMachPortInvalidate(tap)
+        return true
     }
 
     // MARK: - Health monitor (DEGRADED detection)
@@ -132,6 +172,11 @@ final class GlobalHotkeyListener {
         }
 
         // Only F9 / Shift+F9 reaches here. Consume the event.
+        #if DEBUG
+        let flags = event.flags
+        let hasShift = flags.contains(.maskShift)
+        print("[HotkeyListener] F9 detected (shift=\(hasShift)) — invoking handleF9()")
+        #endif
         handleF9()
         return nil
     }
@@ -139,22 +184,34 @@ final class GlobalHotkeyListener {
     private func handleF9() {
         // Re-entrancy guard
         guard !isSwapping else {
+            #if DEBUG
+            print("[HotkeyListener] handleF9 BLOCKED — already swapping (re-entrancy guard)")
+            #endif
             NSSound.beep()
             return
         }
 
         // Secure input check (password fields, etc.)
         if IsSecureEventInputEnabled() {
+            #if DEBUG
+            print("[HotkeyListener] handleF9 BLOCKED — secure input enabled (password field?)")
+            #endif
             NSSound.beep()
             return
         }
 
         // AppState guard
         guard let appState, case .active = appState.current else {
+            #if DEBUG
+            print("[HotkeyListener] handleF9 BLOCKED — appState is \(appState?.current as Any), expected .active")
+            #endif
             NSSound.beep()
             return
         }
 
+        #if DEBUG
+        print("[HotkeyListener] handleF9 — all guards passed, firing onTrigger (onTrigger set: \(onTrigger != nil))")
+        #endif
         isSwapping = true
         onTrigger?()
     }
@@ -177,6 +234,21 @@ private func globalHotkeyCallback(
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
+    // Earliest possible log — runs in the C callback, before any Swift actor dispatch.
+    #if DEBUG
+    if type == .keyDown {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        if keyCode == 100 { // F9
+            print("[C-CALLBACK] >>> F9 keyDown received in raw event tap callback")
+        } else {
+            // Temporary: log all keyDown codes so we can verify the tap is alive
+            print("[C-CALLBACK] keyDown keyCode=\(keyCode)")
+        }
+    } else if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        print("[C-CALLBACK] ⚠️ Event tap was DISABLED by system (type=\(type.rawValue))")
+    }
+    #endif
+
     guard let refcon else { return Unmanaged.passRetained(event) }
 
     return MainActor.assumeIsolated {

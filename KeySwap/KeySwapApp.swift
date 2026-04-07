@@ -138,16 +138,36 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
 
     private func checkInitialPermissions() {
         let hasAX = AXIsProcessTrusted()
+        // Use the non-prompting probe (create+destroy a CGEventTap) instead of
+        // IOHIDRequestAccess, which would trigger a system dialog on first launch.
+        let hasIM = GlobalHotkeyListener.probeInputMonitoring()
+        #if DEBUG
+        print("[KeySwapApp] Initial permissions: AX=\(hasAX), IM=\(hasIM)")
+        #endif
+
         Task { @MainActor in
             appState.updateAccessibility(hasAX)
+            appState.updateInputMonitoring(hasIM)
 
-            // Show onboarding if permissions are missing
+            // If both permissions are granted, start the listener immediately.
+            #if DEBUG
+            print("[KeySwapApp] AppState after permission update: \(appState.current)")
+            #endif
+            if hasAX && hasIM {
+                #if DEBUG
+                print("[KeySwapApp] Both permissions granted — starting hotkey listener")
+                #endif
+                hotkeyListener.start()
+            }
+
+            // Show onboarding if permissions are still missing
             if appState.current != .active {
+                permissionsRouter.onBothGranted = { [weak self] in
+                    self?.hotkeyListener.start()
+                }
                 permissionsRouter.showIfNeeded()
             }
 
-            // Start listening once we reach ACTIVE state
-            // (observer pattern via AppState @Published)
             observeAppState()
         }
     }
@@ -197,48 +217,108 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         }
 
         // 1. Read selected text
-        guard let (text, element, fallbackUsed) = axInteractor.readSelectedText() else {
+        #if DEBUG
+        print("[SwapPipeline] Step 1: reading selected text...")
+        #endif
+        guard let readResult = axInteractor.readSelectedText() else {
+            #if DEBUG
+            print("[SwapPipeline] Step 1 FAILED — no selected text")
+            #endif
             completePipeline(success: false)
             return
         }
 
+        let text: String
+        let axElement: AXUIElement?
+        let fallbackUsed: Bool
+
+        switch readResult {
+        case .ax(let t, let el, let fb):
+            text = t; axElement = el; fallbackUsed = fb
+            #if DEBUG
+            print("[SwapPipeline] Step 1 OK (AX path): \"\(text.prefix(50))\" (len=\(text.count), fallback=\(fallbackUsed))")
+            #endif
+        case .clipboardOnly(let t):
+            text = t; axElement = nil; fallbackUsed = false
+            #if DEBUG
+            print("[SwapPipeline] Step 1 OK (clipboard path): \"\(text.prefix(50))\" (len=\(text.count))")
+            #endif
+        }
+
         // 2. Validate
-        switch axInteractor.validate(element: element, textLength: text.count) {
-        case .readOnly, .noFocusedElement, .overLimit:
-            completePipeline(success: false)
-            return
-        case .ok:
-            break
+        if let el = axElement {
+            let validation = axInteractor.validate(element: el, textLength: text.count)
+            #if DEBUG
+            print("[SwapPipeline] Step 2: validation = \(validation)")
+            #endif
+            switch validation {
+            case .readOnly, .noFocusedElement, .overLimit:
+                completePipeline(success: false)
+                return
+            case .ok:
+                break
+            }
+        } else {
+            // Clipboard-only path: just check length
+            guard text.count <= 2000 else {
+                #if DEBUG
+                print("[SwapPipeline] Step 2: over limit (\(text.count) chars)")
+                #endif
+                completePipeline(success: false)
+                return
+            }
+            #if DEBUG
+            print("[SwapPipeline] Step 2: clipboard path, length OK")
+            #endif
         }
 
         // 3. Detect direction + translate
         let direction = layoutSwitcher.swapDirection()
         let targetLanguage: TargetLanguage = direction == .hebrewToEnglish ? .english : .hebrew
         let translated = translationEngine.translate(text, to: targetLanguage, fallbackMacroUsed: fallbackUsed)
+        #if DEBUG
+        print("[SwapPipeline] Step 3: direction=\(direction), target=\(targetLanguage), translated=\"\(translated.prefix(50))\"")
+        #endif
 
-        // 4. Attempt AX direct write
-        let axResult = axInteractor.write(translated, to: element)
+        // 4. Write translated text back
+        if let el = axElement {
+            // AX path: try direct write, fall back to clipboard
+            let axResult = axInteractor.write(translated, to: el)
+            #if DEBUG
+            print("[SwapPipeline] Step 4: AX write result = \(axResult)")
+            #endif
 
-        switch axResult {
-        case .success:
-            // Direct write succeeded — no clipboard involved
-            layoutSwitcher.switchLayout(to: direction)
-            completePipeline(success: true)
+            switch axResult {
+            case .success:
+                layoutSwitcher.switchLayout(to: direction)
+                completePipeline(success: true)
 
-        case .needsClipboardFallback:
-            // Lazy clipboard stash + Cmd+V path
-            let axEl = AXElement(ref: element)
-            clipboardManager.pasteViaClipboard(
-                translatedText: translated,
-                axElement: axEl
-            ) { [weak self] pasted in
-                guard let self else { return }
-                if pasted {
-                    self.layoutSwitcher.switchLayout(to: direction)
-                    self.completePipeline(success: true)
-                } else {
-                    self.completePipeline(success: false)
+            case .needsClipboardFallback:
+                let axEl = AXElement(ref: el)
+                clipboardManager.pasteViaClipboard(
+                    translatedText: translated,
+                    axElement: axEl
+                ) { [weak self] pasted in
+                    guard let self else { return }
+                    if pasted {
+                        self.layoutSwitcher.switchLayout(to: direction)
+                        self.completePipeline(success: true)
+                    } else {
+                        self.completePipeline(success: false)
+                    }
                 }
+            }
+        } else {
+            // Clipboard-only path (Electron apps): write via Cmd+V, skip AX verification
+            #if DEBUG
+            print("[SwapPipeline] Step 4: clipboard-only write path")
+            #endif
+            clipboardManager.pasteWithoutAXVerification(
+                translatedText: translated
+            ) { [weak self] in
+                guard let self else { return }
+                self.layoutSwitcher.switchLayout(to: direction)
+                self.completePipeline(success: true)
             }
         }
     }

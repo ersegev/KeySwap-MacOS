@@ -36,13 +36,13 @@ public struct TranslationContext {
     // Key: English character → Value: Hebrew character
     // The reverse mapping (Hebrew → English) is derived by inverting this table.
     //
-    // NOTE: This covers unshifted keys only.
-    // Shifted-key mappings (Shift+number row, Shift+punctuation) need verification
-    // against the actual macOS "Hebrew" keyboard layout (see TODOS.md).
-    // Unmapped characters pass through unchanged.
+    // Verified against macOS UCKeyTranslate on the "Hebrew" layout (both unshifted and Shift).
+    // Entries are included only where Hebrew output differs from English output.
+    // Identical characters (digits, !, @, #, $, %, ^, *, +, _, :, |, ?) pass through unchanged.
     private static let englishToHebrew: [Character: Character] = [
+        // --- Unshifted letter/punctuation keys ---
         "q": "/",
-        "w": "'",
+        "w": "׳",  // U+05F3 Hebrew Punctuation Geresh (not ASCII apostrophe U+0027)
         "e": "ק",
         "r": "ר",
         "t": "א",
@@ -53,7 +53,7 @@ public struct TranslationContext {
         "p": "פ",
         "[": "]",
         "]": "[",
-        "\\": "\\",
+        "\\": "ֿ", // U+05BF Hebrew Point Rafe
         "a": "ש",
         "s": "ד",
         "d": "ג",
@@ -75,6 +75,21 @@ public struct TranslationContext {
         ",": "ת",
         ".": "ץ",
         "/": ".",
+
+        // --- Shifted keys that differ from US English ---
+        // Shift+7: English=& Hebrew=₪ (shekel sign U+20AA)
+        "&": "₪",
+        // Shift+': English=" Hebrew=״ (Hebrew double geresh U+05F4)
+        "\"": "״",
+        // Shift+9/0: parens are swapped (Hebrew Shift+9=')' vs English Shift+9='(')
+        "(": ")",
+        ")": "(",
+        // Shift+,/.: angle brackets are swapped (Hebrew Shift+,='>' vs English Shift+,='<')
+        "<": ">",
+        ">": "<",
+        // Shift+[/]: curly braces are swapped (Hebrew Shift+[='}' vs English Shift+[='{')
+        "{": "}",
+        "}": "{",
     ]
 
     // Derived reverse mapping: Hebrew character → English character
