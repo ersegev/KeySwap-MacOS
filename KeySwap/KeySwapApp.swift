@@ -16,6 +16,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
     private let clipboardManager = ClipboardManager()
     private let layoutSwitcher = LayoutSwitcher()
     private let translationEngine = TranslationContext()
+    private let spellCheckFilter = SpellCheckFilter()
 
     private lazy var permissionsRouter = PermissionsRouter(appState: appState)
     private lazy var aboutWindow = AboutWindow()
@@ -49,6 +50,28 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         setupMenuBar()
         setupHotkeyListener()
         checkInitialPermissions()
+        warmUpSpellChecker()
+    }
+
+    // MARK: - Spell checker warm-up
+
+    private func warmUpSpellChecker() {
+        // NSSpellChecker communicates via IPC. First call after login can take
+        // 100-300ms to wake the system daemon — potentially busting the 500ms SLA.
+        // Warm it up on a background queue at launch so the first real swap is fast.
+        DispatchQueue.global(qos: .utility).async {
+            _ = NSSpellChecker.shared.checkSpelling(of: "warmup", startingAt: 0)
+
+            // Pre-learn common Hebrew transliterations that NSSpellChecker would
+            // otherwise silently "correct" (Dvir→Diver, Tzvi→TV, etc.).
+            let hebrewNames = ["Dvir", "Tzvi", "Noa", "Ilan", "Amir", "Eran", "Tamar",
+                               "Gal", "Rotem", "Yonatan", "Michal", "Shira", "Yuval",
+                               "Liron", "Nir", "Shai", "Tal", "Tomer", "Vered", "Ziv"]
+            let checker = NSSpellChecker.shared
+            for name in hebrewNames where !checker.hasLearnedWord(name) {
+                checker.learnWord(name)
+            }
+        }
     }
 
     // MARK: - Menu bar setup
@@ -301,6 +324,12 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             }
             translated = String(chars)
         }
+        // 3c. Post-swap spell check: silently correct English typos that survived the
+        // layout swap (e.g., "teh" → "the"). Runs AFTER the Shift-index pass so
+        // intentional capitalizations are already recovered before spell check sees them.
+        if targetLanguage == .english {
+            translated = spellCheckFilter.postProcess(translated, language: .english, provider: NSSpellCheckerProvider())
+        }
         #if DEBUG
         print("[SwapPipeline] Step 3: direction=\(direction), target=\(targetLanguage), translated=\"\(translated.prefix(50))\"")
         #endif
@@ -369,6 +398,27 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
 
     @objc private func showAbout() {
         aboutWindow.show()
+    }
+}
+
+// MARK: - NSSpellCheckerProvider
+
+private struct NSSpellCheckerProvider: CorrectionProvider {
+    func misspelledRange(in text: String, startingAt offset: Int) -> NSRange {
+        return NSSpellChecker.shared.checkSpelling(of: text, startingAt: offset)
+    }
+
+    func correction(forWord word: String, in text: String) -> String? {
+        let checker = NSSpellChecker.shared
+        let range = NSRange(word.startIndex..., in: word)
+        // Always hardcode "en" — never use checker.language() which reflects system
+        // language and would apply Hebrew spell check on a bilingual user's Mac.
+        return checker.correction(
+            forWordRange: range,
+            in: word,
+            language: "en",
+            inSpellDocumentWithTag: 0
+        )
     }
 }
 
