@@ -32,8 +32,10 @@ public struct SpellCheckFilter {
         while offset < text.utf16.count {
             let range = provider.misspelledRange(in: text, startingAt: offset)
             guard range.length > 0 else { break }
+            let nextOffset = range.location + range.length
+            guard nextOffset > offset else { break } // infinite-loop guard: provider must advance
             ranges.append(range)
-            offset = range.location + range.length
+            offset = nextOffset
         }
 
         guard !ranges.isEmpty else { return text }

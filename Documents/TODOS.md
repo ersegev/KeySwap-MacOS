@@ -15,16 +15,27 @@ Items deferred during CEO review (2026-04-02). Not in MVP scope.
   - Architecture Doc: Change `NSEvent.addGlobalMonitorForEvents` to `CGEventTap`; update AppState enum to include PARTIAL and DEGRADED states; fix clipboard approach
   - Blueprint: Update clipboard approach, add Shift+F9, visual flash, About window, re-entrancy guard, DEGRADED state to testing section
 
-## P1 — Known Bugs
-
-- [x] **Shift+letter dropped on Hebrew layout (lost capitals):** When a user types on the Hebrew layout intending English, Shift+letter keystrokes (e.g., Shift+H for capital "H") produce no output — macOS swallows them because Hebrew letters have no case distinction and the Shift+letter combination has no assigned output for most keys. By the time KeySwap reads the text to swap, those characters are entirely missing from the input (not lowercased — *gone*). **Fix:** Passive keystroke buffer (`KeystrokeBuffer.swift`) records keycode + Shift flag for each keyDown. On F9, the buffer is aligned against the field text to detect and fill in swallowed characters. The original "strip `.maskShift` in real-time" approach was rejected because it would make the app modify keystrokes as they flow, fundamentally changing the trust model. The buffer approach preserves the passive-observer design. See SEC-1a in the Engineering Design Doc.
-
 ## P2 — Post-MVP
 
 - [ ] **Configurable hotkey:** Allow users to remap F9 to a different key via UserDefaults. Store preference in `UserDefaults.standard`. Add a Preferences window accessible from the menu bar. Default remains F9/Shift+F9.
 
+- [ ] **Spell check toggle:** Add an on/off toggle for post-swap spell check to the Preferences window. When disabled, swap in a `NoOpCorrectionProvider` (implements `CorrectionProvider`, returns nil for every word). Useful if false positives are annoying in practice. **Depends on:** Preferences window (above item) + post-swap spell check (P3 below) being built first.
+
 - [ ] **Multi-language foundation:** Parameterize the language pair in TranslationContext so the engine can support additional layout pairs (e.g., Russian/English, Arabic/English) without rewriting core logic. Current implementation hardcodes English/Hebrew. Refactor the character mapping table to be injected rather than compiled-in.
 
-## P3 — Nice to Have
+## P3 — Next Up
 
-- [ ] **Post-swap spell check:** After converting characters, run the translated output through `NSSpellChecker.shared()` to detect grammar/spelling errors introduced by the mapping (e.g., capitalization edge cases the rules miss). Either auto-correct or offer suggestions. Requires careful UX design to avoid surprising the user with unexpected changes.
+- [ ] **Post-swap spell check:** After converting characters, run the translated English output through `NSSpellChecker` to silently correct user typos (e.g., "teh" → "the") that survived the layout swap.
+  - **Architecture:** `SpellCheckFilter` struct in TranslationContext package with an injectable `CorrectionProvider` protocol (AppKit stays in the app layer). `NSSpellCheckerProvider` in KeySwapApp implements the protocol.
+  - **CorrectionProvider has two methods** (eng review finding — keeps NSSpellChecker entirely out of the package):
+    - `misspelledRange(in:startingAt:) -> NSRange`
+    - `correction(forWord:in:) -> String?`
+  - **Insertion point:** KeySwapApp.swift **after the Shift-index uppercase pass** (~line 303), NOT after `translationEngine.translate()` at line 291. The Shift-index pass recovers intentional user capitalizations from the keystroke buffer — spell check before it will corrupt those positions.
+  - **Correction algorithm:** Two-phase back-to-front — collect all misspelled `NSRange` values from the original string via `provider.misspelledRange()`, sort descending, apply corrections end→start. Add bounds check before substring: `guard range.location + range.length <= text.utf16.count else { continue }`.
+  - **Language:** Hardcode `"en"` — do NOT use `NSSpellChecker.shared().language()` which reflects system language.
+  - **Startup requirements (add to `applicationDidFinishLaunching`):**
+    1. Warm up NSSpellChecker on a background queue (first IPC call can take 100–300ms, busting the 500ms SLA): `DispatchQueue.global(qos: .utility).async { _ = NSSpellChecker.shared.checkSpellingOfString("warmup", startingAt: 0) }`
+    2. Pre-learn common Hebrew transliterations to prevent silent "corrections" (Dvir→Diver, Tzvi→TV, etc.) via `NSSpellChecker.shared.learnWord()` for each name — call only if `!hasLearnedWord()`.
+  - **Tests:** `MockCorrectionProvider` must be a **class** (not struct) with an explicit `[NSRange]` queue it pops sequentially. Required test cases: Hebrew no-op, empty string, no misspellings fast path, single correction, longer correction, **multi-misspelling back-to-front** (`"teh recieve foo"` → `"the receive foo"`), nil correction path.
+  - **Scope:** English target only.
+  - **Design doc:** `~/.gstack/projects/eran-segev-KeySwap-MacOS/eransegev-main-design-20260408-234220.md`

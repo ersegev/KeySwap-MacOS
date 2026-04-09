@@ -195,7 +195,17 @@ final class AccessibilityInteractor {
     /// Falls back to kAXValueAttribute + cursor repositioning.
     /// Returns `.needsClipboardFallback` if both are rejected by the target app.
     func write(_ text: String, to element: AXUIElement) -> WriteResult {
-        // Preferred: write to selected text (replaces selection, cursor lands at end).
+        // Read selection range before writing so we can reposition cursor afterward.
+        // Cmd+Shift+Left (line-selection fallback) creates a backward selection; some apps
+        // leave the cursor at the start of the replaced range rather than the end.
+        var selRangeRef: CFTypeRef?
+        var selRange = CFRange(location: 0, length: 0)
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selRangeRef) == .success,
+           let axVal = selRangeRef {
+            AXValueGetValue(axVal as! AXValue, .cfRange, &selRange)
+        }
+
+        // Preferred: write to selected text (replaces selection).
         let selErr = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
         #if DEBUG
         print("[AXInteractor] write via kAXSelectedTextAttribute → \(selErr.rawValue)")
@@ -203,6 +213,14 @@ final class AccessibilityInteractor {
         if selErr == .success {
             // Verify it actually changed — some apps return success but silently ignore.
             if let val = currentValue(of: element), val.contains(text) {
+                // Explicitly reposition cursor to end of inserted text.
+                // kAXSelectedTextAttribute with a backward selection (e.g. from Cmd+Shift+Left)
+                // may leave the cursor at the start of the replaced range.
+                let newLocation = selRange.location + text.utf16.count
+                var newRange = CFRange(location: newLocation, length: 0)
+                if let rangeValue = AXValueCreate(.cfRange, &newRange) {
+                    AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, rangeValue)
+                }
                 return .success
             }
             #if DEBUG
