@@ -136,9 +136,11 @@ final class ClipboardManager {
             self.sendBackspaceChain(remaining: charCount) { [weak self] in
                 guard let self else { return }
                 // Small extra pause so the final deletion settles before paste.
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(40)) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(40)) { [weak self] in
+                    guard let self else { return }
                     self.sendCmdV()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100)) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100)) { [weak self] in
+                        guard let self else { return }
                         self.restoreAndZero(snapshot)
                         onComplete(true)
                     }

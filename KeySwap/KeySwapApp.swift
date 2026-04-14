@@ -222,7 +222,9 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         }
 
         updateMenuBarIcon()
+        #if DEBUG
         print("[KeySwap] correction badge activated: \(summary)")
+        #endif
     }
 
     /// Schedule badge removal after the grace period. Called when the HUD
@@ -518,8 +520,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             appliedCorrections = spellResult.corrections
         }
 
-        // Unconditional log: makes it easy to confirm whether spell check ran
-        // and what (if anything) it corrected, without needing a DEBUG build.
+        #if DEBUG
         if targetLanguage == .english && !skipSpellCheck {
             if appliedCorrections.isEmpty {
                 print("[SpellCheck] No misspellings found in swapped text: \"\(translated.prefix(80))\"")
@@ -532,6 +533,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         } else {
             print("[SpellCheck] Skipped (target=\(targetLanguage), spell check runs on English target only)")
         }
+        #endif
         #if DEBUG
         print("[SwapPipeline] Step 3: direction=\(direction), target=\(targetLanguage), translated=\"\(translated.prefix(50))\"")
         #endif
@@ -673,6 +675,12 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             // (UTF16 code units). macOS Backspace deletes one grapheme cluster
             // per press — a single emoji is 2 UTF16 units but 1 Backspace.
             let charCount = pending.correctedText.count
+            guard charCount > 0 else {
+                // Defensive: corrected text is empty — nothing to backspace over.
+                NSSound.beep()
+                hotkeyListener.swapCompleted()
+                return
+            }
             print("[RevertPipeline] clipboard-only revert: backspacing \(charCount) chars and pasting pre-correction text")
             clipboardManager.replaceLastNCharsWithPaste(
                 charCount: charCount,
