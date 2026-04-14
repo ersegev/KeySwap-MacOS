@@ -28,3 +28,8 @@ Items deferred during CEO review (2026-04-02). Not in MVP scope.
 - [ ] **QA matrix for correction HUD:** Manual end-to-end test grid covering plain F9 / Option+F9 / Ctrl+F9 / Shift+F9 across TextEdit, Notes, Xcode, Mail, Slack, VS Code, Chrome textareas, Discord. Document expected HUD placement (cursor-adjacent vs corner fallback) per app. Commit results to `Documents/QA-v1.1-matrix.md` before tagging v1.1.
 
 - [x] **Revert on clipboard-only paths (shipped in UX pass):** Implemented via synthesized Backspace × N + paste of pre-correction text. See [ClipboardManager.replaceLastNCharsWithPaste](../KeySwap/ClipboardManager.swift). Works everywhere the original swap works (same trust assumptions).
+
+## QA Fixes (2026-04-14 /qa pass on UX-design-improvement branch)
+
+- [x] **HUD timer reverted to production values** — DEV-doubled duration (6s+1s/correction, cap 12s) corrected back to designed values (3s+0.5s/correction, cap 6s). Fixed by /qa in commit `d89a541`.
+- [x] **Removed `learnWord()` calls from warmUpSpellChecker()** — Calls permanently mutated the system-wide spell dictionary (affects all apps). Removed per the prohibition documented in the Correction Learning Loop P3 item above. Fixed by /qa in commit `d89a541`.
