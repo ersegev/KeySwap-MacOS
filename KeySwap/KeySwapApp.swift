@@ -11,6 +11,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
     // MARK: - Components
 
     private let appState = AppState()
+    private let appSettings = AppSettings()
     private let hotkeyListener = GlobalHotkeyListener()
     private let axInteractor = AccessibilityInteractor()
     private let clipboardManager = ClipboardManager()
@@ -18,9 +19,11 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
     private let translationEngine = TranslationContext()
     private let spellCheckFilter = SpellCheckFilter()
     private let correctionsHUD = CorrectionsHUD()
+    private let errorFeedbackHUD = ErrorFeedbackHUD()
 
     private lazy var permissionsRouter = PermissionsRouter(appState: appState)
     private lazy var aboutWindow = AboutWindow()
+    private let preferencesWindow = PreferencesWindow()
 
     // MARK: - Menu bar
 
@@ -74,9 +77,30 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             try? SMAppService.mainApp.register()
         }
 
+        // Wire AppSettings into components
+        correctionsHUD.appSettings = appSettings
+        errorFeedbackHUD.appSettings = appSettings
+        aboutWindow.appState = appState
+        aboutWindow.appSettings = appSettings
+        preferencesWindow.appSettings = appSettings
+
+        // Wire hotkey change callback: when user picks a new key in Preferences,
+        // restart the listener with the new keycode.
+        appSettings.onHotkeyChanged = { [weak self] newCode in
+            self?.hotkeyListener.updateHotkey(newCode)
+        }
+
+        // Initialize listener hotkey from saved settings
+        hotkeyListener.updateHotkey(appSettings.primaryHotkey)
+
         setupMenuBar()
         setupHotkeyListener()
         checkInitialPermissions()
+
+        // Hebrew spell-check availability detection runs BEFORE warm-up so the
+        // warm-up only primes languages that are actually installed. Cheap —
+        // a single AppKit property read against NSSpellChecker.shared.
+        SpellCheckAvailability.shared.detect()
         warmUpSpellChecker()
 
         // Keep the corrections HUD in sync with revert availability. When
@@ -99,12 +123,37 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         // NSSpellChecker communicates via IPC. First call after login can take
         // 100-300ms to wake the system daemon — potentially busting the 500ms SLA.
         // Warm it up on a background queue at launch so the first real swap is fast.
+        //
+        // The Hebrew warm-up uses the 7-arg overload with explicit language: "he"
+        // and a known-good Hebrew noun ("בית", "house"). Priming on a real word
+        // forces the Hebrew dictionary state to load, not just the IPC channel.
+        // Only run when Hebrew is actually available — no point burning IPC
+        // priming a language NSSpellChecker can't check anyway.
+        let hebrewAvailable = SpellCheckAvailability.shared.hasHebrew
         DispatchQueue.global(qos: .utility).async {
-            _ = NSSpellChecker.shared.checkSpelling(of: "warmup", startingAt: 0)
             // NOTE: Do NOT call learnWord() here. learnWord() writes to the system-wide
             // spell dictionary and pollutes every app on the Mac. Per-session ignored words
             // (to prevent Hebrew name transliterations from being "corrected") belong in the
             // Correction Learning Loop feature (P3 in TODOS.md) using a per-document tag.
+            #if DEBUG
+            print("[HebrewSpellCheck] warm-up start (hebrew=\(hebrewAvailable))")
+            let started = Date()
+            #endif
+            _ = NSSpellChecker.shared.checkSpelling(of: "warmup", startingAt: 0)
+            if hebrewAvailable {
+                _ = NSSpellChecker.shared.checkSpelling(
+                    of: "בית",
+                    startingAt: 0,
+                    language: "he",
+                    wrap: false,
+                    inSpellDocumentWithTag: 0,
+                    wordCount: nil
+                )
+            }
+            #if DEBUG
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            print("[HebrewSpellCheck] warm-up complete (\(ms) ms)")
+            #endif
         }
     }
 
@@ -143,7 +192,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         lastCorrection.tag = Self.lastCorrectionItemTag
         menu.addItem(lastCorrection)
 
-        let revertItem = NSMenuItem(title: "Revert last correction (F9 while open)", action: #selector(revertLastCorrectionFromMenu), keyEquivalent: "")
+        let revertItem = NSMenuItem(title: "Revert last correction (\(appSettings.primaryHotkeyDisplayName) while open)", action: #selector(revertLastCorrectionFromMenu), keyEquivalent: "")
         revertItem.target = self
         revertItem.isEnabled = false
         revertItem.tag = Self.revertCorrectionItemTag
@@ -152,6 +201,8 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(title: "About KeySwap", action: #selector(showAbout), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Preferences\u{2026}", action: #selector(showPreferences), keyEquivalent: ","))
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit KeySwap", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
         statusMenu = menu
@@ -205,7 +256,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         hasActiveCorrectionBadge = true
 
         // Summary text: first correction, plus "+N more" if we trimmed.
-        let head = corrections.first.map { "\($0.originalWord) → \($0.replacementWord)" } ?? "—"
+        let head = corrections.first.map { "\($0.originalWord) \u{2192} \($0.replacementWord)" } ?? "\u{2014}"
         let summary: String
         if corrections.count > 1 {
             summary = "\(head) (+\(corrections.count - 1) more)"
@@ -266,10 +317,10 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
 
     private func menuTitle() -> String {
         switch appState.current {
-        case .active: return "KeySwap — Active"
-        case .degraded: return "KeySwap — Degraded (retrying...)"
-        case .permissionsRequired: return "KeySwap — Permissions Required"
-        case .partial: return "KeySwap — Partial Permissions"
+        case .active: return "KeySwap \u{2014} Active"
+        case .degraded: return "KeySwap \u{2014} Degraded (retrying...)"
+        case .permissionsRequired: return "KeySwap \u{2014} Permissions Required"
+        case .partial: return "KeySwap \u{2014} Partial Permissions"
         }
     }
 
@@ -282,13 +333,42 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         // the green tint remains the only feedback that F9 did something.
         guard !hasActiveCorrectionBadge else { return }
         guard let button = statusItem?.button else { return }
-        button.image = NSImage(systemSymbolName: "keyboard.fill", accessibilityDescription: "KeySwap — swapped")
+        button.image = NSImage(systemSymbolName: "keyboard.fill", accessibilityDescription: "KeySwap \u{2014} swapped")
         button.contentTintColor = .systemGreen
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             // Restore through updateMenuBarIcon so we respect any state change
             // that happened during the flash window (e.g. AppState went
             // degraded, or a correction badge arrived).
+            self?.updateMenuBarIcon()
+        }
+    }
+
+    // MARK: - Writing-direction confirmation (v1.2 post-plan safety)
+
+    /// Surfaces the writing-direction flip to the user AT THE MOMENT it happens
+    /// (per pinned memory: silent text mutations are unacceptable). Only fires
+    /// a toast when LayoutSwitcher actually pressed the menu item; silent for
+    /// alreadyAtTarget (idempotent skip) and unavailable (feature not applicable).
+    @MainActor
+    private func announceDirectionFlip(_ result: LayoutSwitcher.WritingDirectionResult, to direction: LayoutSwitcher.Direction) {
+        guard result == .flipped else { return }
+        let label: String
+        switch direction {
+        case .hebrewToEnglish: label = "Paragraph: LTR"
+        case .englishToHebrew: label = "Paragraph: RTL"
+        }
+        errorFeedbackHUD.show(message: label)
+    }
+
+    // MARK: - Visual failure flash (v1.2: red icon for 2s)
+
+    private func flashFailure() {
+        guard let button = statusItem?.button else { return }
+        button.image = NSImage(systemSymbolName: "keyboard.fill", accessibilityDescription: "KeySwap \u{2014} failed")
+        button.contentTintColor = .systemRed
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             self?.updateMenuBarIcon()
         }
     }
@@ -314,14 +394,20 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
     @MainActor
     private func handleHotkey(mode: SwapMode) {
         if mode == .forward, correctionsHUD.isShowing, appState.pendingRevert != nil {
-            print("[KeySwap] F9 while HUD open — routing to revert")
+            print("[KeySwap] Hotkey while HUD open \u{2014} routing to revert")
             runRevertPipeline()
             return
         }
         switch mode {
         case .forward, .reverse:
+            // Per-language gating happens inside runSwapPipeline once the
+            // target language is known (depends on layout direction). Pass
+            // skipSpellCheck=false here; runSwapPipeline consults
+            // appSettings.spellCheckEnabledEnglish / spellCheckEnabledHebrew.
             runSwapPipeline(skipSpellCheck: false)
         case .raw:
+            // Option+F9 explicitly skips spell check regardless of any
+            // per-language toggle.
             runSwapPipeline(skipSpellCheck: true)
         case .revert:
             runRevertPipeline()
@@ -349,7 +435,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             #endif
             if hasAX && hasIM {
                 #if DEBUG
-                print("[KeySwapApp] Both permissions granted — starting hotkey listener")
+                print("[KeySwapApp] Both permissions granted \u{2014} starting hotkey listener")
                 #endif
                 hotkeyListener.start()
             }
@@ -408,9 +494,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         // SLA timeout: 500ms total (Design Change 3)
         let sla = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            NSSound.beep()
-            self.clipboardManager.cancelPending()
-            self.hotkeyListener.swapCompleted()
+            self.completePipeline(.failure(.timeout))
         }
         slaTimeoutItem = sla
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(500), execute: sla)
@@ -426,9 +510,9 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         #endif
         guard let readResult = axInteractor.readSelectedText() else {
             #if DEBUG
-            print("[SwapPipeline] Step 1 FAILED — no selected text")
+            print("[SwapPipeline] Step 1 FAILED \u{2014} no selected text")
             #endif
-            completePipeline(success: false)
+            completePipeline(.failure(.noTextSelected))
             return
         }
 
@@ -442,8 +526,8 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             #if DEBUG
             print("[SwapPipeline] Step 1 OK (AX path): \"\(text.prefix(50))\" (len=\(text.count), fallback=\(fallbackUsed))")
             #endif
-        case .clipboardOnly(let t):
-            text = t; axElement = nil; fallbackUsed = false
+        case .clipboardOnly(let t, let fb):
+            text = t; axElement = nil; fallbackUsed = fb
             #if DEBUG
             print("[SwapPipeline] Step 1 OK (clipboard path): \"\(text.prefix(50))\" (len=\(text.count))")
             #endif
@@ -456,8 +540,14 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             print("[SwapPipeline] Step 2: validation = \(validation)")
             #endif
             switch validation {
-            case .readOnly, .noFocusedElement, .overLimit:
-                completePipeline(success: false)
+            case .readOnly:
+                completePipeline(.failure(.readOnly))
+                return
+            case .noFocusedElement:
+                completePipeline(.failure(.noFocusedElement))
+                return
+            case .overLimit:
+                completePipeline(.failure(.overLimit))
                 return
             case .ok:
                 break
@@ -468,7 +558,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
                 #if DEBUG
                 print("[SwapPipeline] Step 2: over limit (\(text.count) chars)")
                 #endif
-                completePipeline(success: false)
+                completePipeline(.failure(.overLimit))
                 return
             }
             #if DEBUG
@@ -488,7 +578,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             textToTranslate = enrichment.text
             shiftIndices = enrichment.shiftIndices
             #if DEBUG
-            print("[SwapPipeline] Step 3a: buffer enrichment applied (field=\(text.count) chars → enriched=\(enrichment.text.count) chars, shifts=\(shiftIndices))")
+            print("[SwapPipeline] Step 3a: buffer enrichment applied (field=\(text.count) chars \u{2192} enriched=\(enrichment.text.count) chars, shifts=\(shiftIndices))")
             #endif
         }
 
@@ -505,33 +595,55 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             }
             translated = String(chars)
         }
-        // 3c. Post-swap spell check: corrects English typos that survived the
-        // layout swap (e.g., "teh" → "the"). Runs AFTER the Shift-index pass so
-        // intentional capitalizations are already recovered before spell check
-        // sees them. Corrections are now TRACKED and made visible to the user
-        // via the CorrectionsHUD, with Ctrl+F9 as an escape hatch.
-        // If `skipSpellCheck` is true (Option+F9 raw path), correction is skipped
-        // entirely — the user gets the raw swap with no modifications.
+        // 3c. Post-swap spell check: corrects typos that survived the layout
+        // swap (e.g., "teh" -> "the" for English; comparable for Hebrew).
+        // Runs AFTER the Shift-index pass so intentional capitalizations are
+        // already recovered before spell check sees them. Corrections are
+        // TRACKED and made visible to the user via the CorrectionsHUD, with
+        // Ctrl+F9 (or F9 while HUD open) as an escape hatch.
+        //
+        // Gating order:
+        //   1. Option+F9 raw override (skipSpellCheck=true) wins over everything.
+        //   2. Per-language toggle (appSettings.spellCheckEnabled{English,Hebrew}).
+        //   3. For Hebrew: dictionary availability check. If missing, fire the
+        //      one-time-per-session install toast and skip spell check.
+        //   4. Otherwise, run the language-matched provider.
         let preCorrectionText = translated
         var appliedCorrections: [Correction] = []
-        if targetLanguage == .english && !skipSpellCheck {
-            let spellResult = spellCheckFilter.postProcess(translated, language: .english, provider: NSSpellCheckerProvider())
+
+        let decision = spellCheckDecision(
+            target: targetLanguage,
+            skipSpellCheck: skipSpellCheck,
+            englishEnabled: appSettings.spellCheckEnabledEnglish,
+            hebrewEnabled: appSettings.spellCheckEnabledHebrew,
+            hasHebrew: SpellCheckAvailability.shared.hasHebrew
+        )
+
+        switch decision {
+        case .skip:
+            break
+        case .skipAndShowMissingDictToast:
+            showHebrewDictionaryMissingToastIfNeeded()
+        case .run(let langCode):
+            let provider = SingleLanguageSpellCheckerProvider(languageCode: langCode)
+            let spellResult = spellCheckFilter.postProcess(translated, language: targetLanguage, provider: provider)
             translated = spellResult.corrected
             appliedCorrections = spellResult.corrections
         }
 
         #if DEBUG
-        if targetLanguage == .english && !skipSpellCheck {
-            if appliedCorrections.isEmpty {
-                print("[SpellCheck] No misspellings found in swapped text: \"\(translated.prefix(80))\"")
-            } else {
-                let pairs = appliedCorrections.map { "\($0.originalWord)→\($0.replacementWord)" }.joined(separator: ", ")
-                print("[SpellCheck] Found \(appliedCorrections.count) correction(s): \(pairs)")
-            }
-        } else if skipSpellCheck {
-            print("[SpellCheck] Skipped (Option+F9 raw swap)")
-        } else {
-            print("[SpellCheck] Skipped (target=\(targetLanguage), spell check runs on English target only)")
+        switch decision {
+        case .skip where skipSpellCheck:
+            print("[SpellCheck] Skipped (Option+\(appSettings.primaryHotkeyDisplayName) raw swap)")
+        case .skip:
+            print("[SpellCheck] Skipped (target=\(targetLanguage), per-language toggle off)")
+        case .skipAndShowMissingDictToast:
+            print("[HebrewSpellCheck] pipeline skipped: dict missing (toast shown if unacknowledged)")
+        case .run where appliedCorrections.isEmpty:
+            print("[SpellCheck] target=\(targetLanguage) — no misspellings: \"\(translated.prefix(80))\"")
+        case .run:
+            let pairs = appliedCorrections.map { "\($0.originalWord)\u{2192}\($0.replacementWord)" }.joined(separator: ", ")
+            print("[SpellCheck] target=\(targetLanguage) — \(appliedCorrections.count) correction(s): \(pairs)")
         }
         #endif
         #if DEBUG
@@ -555,14 +667,19 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             switch axResult {
             case .success:
                 layoutSwitcher.switchLayout(to: direction)
+                if fallbackUsed {
+                    let dirResult = layoutSwitcher.flipWritingDirection(to: direction)
+                    announceDirectionFlip(dirResult, to: direction)
+                }
                 recordPendingRevertAndShowHUD(
                     preCorrectionText: preCorrectionText,
                     correctedText: translated,
                     corrections: appliedCorrections,
+                    language: targetLanguage,
                     element: el,
                     insertionStart: insertionStart
                 )
-                completePipeline(success: true)
+                completePipeline(.success(corrections: appliedCorrections))
 
             case .needsClipboardFallback:
                 let axEl = AXElement(ref: el)
@@ -573,6 +690,10 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
                     guard let self else { return }
                     if pasted {
                         self.layoutSwitcher.switchLayout(to: direction)
+                        if fallbackUsed {
+                            let dirResult = self.layoutSwitcher.flipWritingDirection(to: direction)
+                            self.announceDirectionFlip(dirResult, to: direction)
+                        }
                         // Clipboard fallback on AX-available apps: still show HUD
                         // (user deserves to see corrections) but revert will use
                         // the AX element if it still accepts writes.
@@ -580,12 +701,13 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
                             preCorrectionText: preCorrectionText,
                             correctedText: translated,
                             corrections: appliedCorrections,
+                            language: targetLanguage,
                             element: el,
                             insertionStart: insertionStart
                         )
-                        self.completePipeline(success: true)
+                        self.completePipeline(.success(corrections: appliedCorrections))
                     } else {
-                        self.completePipeline(success: false)
+                        self.completePipeline(.failure(.clipboardFailed))
                     }
                 }
             }
@@ -602,25 +724,32 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             ) { [weak self] in
                 guard let self else { return }
                 self.layoutSwitcher.switchLayout(to: direction)
+                if fallbackUsed {
+                    let dirResult = self.layoutSwitcher.flipWritingDirection(to: direction)
+                    self.announceDirectionFlip(dirResult, to: direction)
+                }
                 self.recordPendingRevertAndShowHUD(
                     preCorrectionText: preCorrectionText,
                     correctedText: translated,
                     corrections: appliedCorrections,
+                    language: targetLanguage,
                     element: nil,
                     insertionStart: 0
                 )
-                self.completePipeline(success: true)
+                self.completePipeline(.success(corrections: appliedCorrections))
             }
         }
     }
 
     /// Stashes pendingRevert state and shows the corrections HUD if any
     /// corrections were applied. No-op when corrections is empty.
+    /// `language` controls the HUD's arrow direction (→ for English, ← for Hebrew).
     @MainActor
     private func recordPendingRevertAndShowHUD(
         preCorrectionText: String,
         correctedText: String,
         corrections: [Correction],
+        language: TargetLanguage,
         element: AXUIElement?,
         insertionStart: Int
     ) {
@@ -643,8 +772,58 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             self.correctionsHUD.dismiss(reason: "revert-window-expired")
             self.scheduleCorrectionBadgeClear(after: self.badgeGracePeriodSeconds)
         }
-        correctionsHUD.show(corrections: corrections, caretElement: element)
+        correctionsHUD.show(corrections: corrections, language: language, caretElement: element)
         activateCorrectionBadge(corrections: corrections)
+    }
+
+    // MARK: - Hebrew dictionary missing toast (v1.3)
+
+    /// Fires the clickable "install Hebrew dictionary" toast on every Hebrew
+    /// swap while the dict is missing, until the user EXPLICITLY acknowledges
+    /// it (body click or X button). Auto-timer expiry does NOT count as
+    /// acknowledgement — a looked-away user would otherwise miss the install
+    /// prompt for the whole session (feedback_silent_mutations).
+    @MainActor
+    private func showHebrewDictionaryMissingToastIfNeeded() {
+        guard SpellCheckAvailability.shouldShowMissingDictToast(
+            hasHebrew: SpellCheckAvailability.shared.hasHebrew,
+            acknowledged: SpellCheckAvailability.shared.hasUserAcknowledgedMissing
+        ) else { return }
+
+        // Honor the user's error feedback mode (.silent suppresses all toasts).
+        // Do NOT flip `hasUserAcknowledgedMissing` here — if the user later
+        // switches back to Toast mode, they should see the prompt. Silent
+        // mode is a "don't interrupt me right now" choice, not a permanent
+        // acknowledgement.
+        guard appSettings.errorFeedbackMode == .toast else { return }
+
+        errorFeedbackHUD.showClickable(
+            message: "Hebrew dictionary not installed — click to open Settings",
+            onClick: { [weak self] in
+                self?.openHebrewDictionaryInstallSettings()
+            },
+            onDismiss: {
+                // Only explicit dismissal (click body, X button, superseded
+                // by new toast) fires this. The timer path no longer counts,
+                // so a looked-away user still sees the prompt on next swap.
+                SpellCheckAvailability.shared.hasUserAcknowledgedMissing = true
+            }
+        )
+    }
+
+    /// Opens System Settings to the Keyboard → Text pane (macOS 13+) so the
+    /// user can install the Hebrew spell-check dictionary. Falls back to the
+    /// generic Keyboard pane if the deeper anchor URL is rejected.
+    @MainActor
+    private func openHebrewDictionaryInstallSettings() {
+        let primary = "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Text"
+        let fallback = "x-apple.systempreferences:com.apple.preference.keyboard"
+        if let url = URL(string: primary), NSWorkspace.shared.open(url) {
+            return
+        }
+        if let url = URL(string: fallback) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     /// Ctrl+F9 revert path. Rewrites pre-correction text over the corrected
@@ -654,9 +833,10 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
     private func runRevertPipeline() {
         guard let pending = appState.pendingRevert else {
             #if DEBUG
-            print("[RevertPipeline] No pendingRevert — beep")
+            print("[RevertPipeline] No pendingRevert \u{2014} beep")
             #endif
-            NSSound.beep()
+            appSettings.playBeep()
+            flashFailure()
             hotkeyListener.swapCompleted()
             return
         }
@@ -677,7 +857,8 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             let charCount = pending.correctedText.count
             guard charCount > 0 else {
                 // Defensive: corrected text is empty — nothing to backspace over.
-                NSSound.beep()
+                appSettings.playBeep()
+                flashFailure()
                 hotkeyListener.swapCompleted()
                 return
             }
@@ -690,7 +871,8 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
                 if success {
                     self.flashSuccess()
                 } else {
-                    NSSound.beep()
+                    self.appSettings.playBeep()
+                    self.flashFailure()
                 }
                 self.hotkeyListener.swapCompleted()
             }
@@ -705,14 +887,14 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         )
         let selected = axInteractor.setSelectionRange(selectRange, on: el)
         #if DEBUG
-        print("[RevertPipeline] setSelectionRange(\(selectRange)) → \(selected)")
+        print("[RevertPipeline] setSelectionRange(\(selectRange)) \u{2192} \(selected)")
         #endif
 
         let axResult = axInteractor.write(pending.preCorrectionText, to: el)
         switch axResult {
         case .success:
             #if DEBUG
-            print("[RevertPipeline] AX write succeeded — revert complete")
+            print("[RevertPipeline] AX write succeeded \u{2014} revert complete")
             #endif
             flashSuccess()
             hotkeyListener.swapCompleted()
@@ -722,14 +904,15 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             // fallback for revert — it would require another Cmd+V and further
             // mutate the user's state. Beep, leave corrected text in place.
             #if DEBUG
-            print("[RevertPipeline] AX write needs clipboard fallback — beep, leaving corrected text")
+            print("[RevertPipeline] AX write needs clipboard fallback \u{2014} beep, leaving corrected text")
             #endif
-            NSSound.beep()
+            appSettings.playBeep()
+            flashFailure()
             hotkeyListener.swapCompleted()
         }
     }
 
-    private func completePipeline(success: Bool) {
+    private func completePipeline(_ result: SwapResult) {
         // Cancel the SLA timeout
         slaTimeoutItem?.cancel()
         slaTimeoutItem = nil
@@ -737,10 +920,36 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         // Clear keystroke buffer after every swap attempt (success or failure)
         hotkeyListener.keystrokeBuffer.clear()
 
-        if success {
+        switch result {
+        case .success(let corrections):
+            if corrections.isEmpty {
+                // Clean swap — CorrectionsHUD not shown, play success sound
+                appSettings.playSuccess()
+            }
+            // else: CorrectionsHUD.show() fires appSettings.playCorrections() — do NOT play here
             flashSuccess()
-        } else {
-            NSSound.beep()
+
+            // Update AppState outcome for About window status line
+            if corrections.isEmpty {
+                appState.setLastSwapOutcome("Clean swap")
+            } else {
+                let count = corrections.count
+                appState.setLastSwapOutcome("\(count) correction\(count == 1 ? "" : "s") applied")
+            }
+
+        case .failure(let reason):
+            appSettings.playBeep()
+            flashFailure()
+
+            // Show error toast if feedback mode is .toast
+            if appSettings.errorFeedbackMode == .toast {
+                errorFeedbackHUD.show(message: reason.userMessage)
+            }
+
+            appState.setLastSwapOutcome("Failed: \(reason.userMessage)")
+
+            // Cancel any in-flight clipboard operation on failure
+            clipboardManager.cancelPending()
         }
 
         hotkeyListener.swapCompleted()
@@ -751,26 +960,9 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         aboutWindow.show()
     }
-}
 
-// MARK: - NSSpellCheckerProvider
-
-private struct NSSpellCheckerProvider: CorrectionProvider {
-    func misspelledRange(in text: String, startingAt offset: Int) -> NSRange {
-        return NSSpellChecker.shared.checkSpelling(of: text, startingAt: offset)
-    }
-
-    func correction(forWord word: String, in text: String) -> String? {
-        let checker = NSSpellChecker.shared
-        let range = NSRange(word.startIndex..., in: word)
-        // Always hardcode "en" — never use checker.language() which reflects system
-        // language and would apply Hebrew spell check on a bilingual user's Mac.
-        return checker.correction(
-            forWordRange: range,
-            in: word,
-            language: "en",
-            inSpellDocumentWithTag: 0
-        )
+    @objc private func showPreferences() {
+        preferencesWindow.show()
     }
 }
 
