@@ -682,10 +682,12 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             print("[SwapPipeline] Step 4: AX write result = \(axResult)")
             #endif
 
+            let isChromium = layoutSwitcher.isChromiumBrowser(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+
             switch axResult {
             case .success:
                 layoutSwitcher.switchLayout(to: direction)
-                if fallbackUsed {
+                if fallbackUsed || isChromium {
                     let dirResult = layoutSwitcher.flipWritingDirection(to: direction)
                     announceDirectionFlip(dirResult, to: direction)
                 }
@@ -708,7 +710,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
                     guard let self else { return }
                     if pasted {
                         self.layoutSwitcher.switchLayout(to: direction)
-                        if fallbackUsed {
+                        if fallbackUsed || isChromium {
                             let dirResult = self.layoutSwitcher.flipWritingDirection(to: direction)
                             self.announceDirectionFlip(dirResult, to: direction)
                         }
@@ -742,7 +744,8 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             ) { [weak self] in
                 guard let self else { return }
                 self.layoutSwitcher.switchLayout(to: direction)
-                if fallbackUsed {
+                let isChromiumClipboard = self.layoutSwitcher.isChromiumBrowser(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+                if fallbackUsed || isChromiumClipboard {
                     let dirResult = self.layoutSwitcher.flipWritingDirection(to: direction)
                     self.announceDirectionFlip(dirResult, to: direction)
                 }

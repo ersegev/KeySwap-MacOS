@@ -285,6 +285,14 @@ final class LayoutSwitcher {
 
     // MARK: - Chromium browser direction
 
+    /// Returns true if the bundle ID belongs to a known Chromium-based browser.
+    /// Used by the swap pipeline to decide whether to flip writing direction
+    /// unconditionally (Chromium's JS approach is scope-safe; it always acts on
+    /// the whole contenteditable div, not just the current selection).
+    func isChromiumBrowser(bundleID: String?) -> Bool {
+        return chromiumAppleScriptName(for: bundleID) != nil
+    }
+
     /// Returns the AppleScript application name for known Chromium-based browsers,
     /// or nil if the bundle ID is not a recognized Chromium browser.
     private func chromiumAppleScriptName(for bundleID: String?) -> String? {
