@@ -16,10 +16,10 @@
     <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 
     <key>CFBundleVersion</key>
-    <string>6</string>
+    <string>7</string>
 
     <key>CFBundleShortVersionString</key>
-    <string>1.2.1</string>
+    <string>1.2.2</string>
 
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
@@ -50,5 +50,11 @@
 
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+
+    <!-- Prevent multiple instances: Launch Services enforces this at the OS level.
+         A runtime check in applicationDidFinishLaunching handles the edge case where
+         two copies live at different paths (e.g., Downloads vs Applications). -->
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
 </dict>
 </plist>

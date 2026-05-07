@@ -5,6 +5,24 @@ All notable changes to KeySwap for macOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2.0] - 2026-05-06
+
+### Fixed
+
+- **Version number now shows correctly in About window** — The About window was displaying `1.2.1` instead of the current version. Fixed by updating `CFBundleShortVersionString` in Info.plist to `1.2.2` (Apple requires three-part versions in this key; the full four-part version is tracked in the `VERSION` file).
+
+- **Single-instance enforcement** — KeySwap now prevents multiple instances from running simultaneously. A second launch will activate the already-running instance and show a brief "KeySwap is already running" dialog before exiting. Previously, two instances could coexist silently, causing duplicate hotkey listeners and unpredictable swap behavior. Enforced both at the OS level (`LSMultipleInstancesProhibited`) and via a runtime check on launch.
+
+### Added
+
+- **DMG now includes drag-to-Applications shortcut** — The installer DMG contains a shortcut to `/Applications` alongside `KeySwap.app`, so installation is a single drag without needing to open a separate Finder window. Standard macOS install pattern.
+
+- **Release script (`scripts/release.sh`)** — New helper script that bumps all version fields (`VERSION` file, `CFBundleShortVersionString`, `CFBundleVersion`) in one command, then prints step-by-step instructions for building and packaging the release. Eliminates the manual version-field drift that caused the 1.2.1 display bug.
+
+- **DMG build script (`scripts/build-dmg.sh`)** — Creates a distributable DMG with the Applications symlink from a built `.app`. Takes `<path-to-app> <version>` as arguments. Safe to re-run (overwrites existing DMG).
+
+---
+
 ## [1.2.1.1] - 2026-05-06
 
 ### Fixed

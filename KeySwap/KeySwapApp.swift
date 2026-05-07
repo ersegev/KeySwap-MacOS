@@ -63,6 +63,29 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
     // MARK: - applicationDidFinishLaunching
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Enforce single instance. LSMultipleInstancesProhibited in Info.plist handles
+        // Finder/dock launches; this runtime check catches the edge case where two copies
+        // of the app exist at different paths (e.g., Downloads and Applications).
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        guard !bundleID.isEmpty else { return }
+        let duplicates = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { !$0.isTerminated && $0 != NSRunningApplication.current }
+        if !duplicates.isEmpty {
+            if #available(macOS 14.0, *) {
+                duplicates.first?.activate()
+            } else {
+                duplicates.first?.activate(options: .activateIgnoringOtherApps)
+            }
+            let alert = NSAlert()
+            alert.messageText = "KeySwap is already running"
+            alert.informativeText = "Only one instance of KeySwap can run at a time."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            NSApp.terminate(nil)
+            return
+        }
+
         // Log the running build identity. Printed unconditionally (not DEBUG-gated)
         // so release builds also surface this — makes it trivial to confirm which
         // version is running via Console.app or Xcode's console.
