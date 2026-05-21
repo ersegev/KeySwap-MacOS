@@ -669,6 +669,10 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
         #endif
 
         // 4. Write translated text back
+        // Capture at pipeline time so async closures below see the app that was
+        // frontmost when the swap was triggered, not whatever is frontmost later.
+        let isChromium = layoutSwitcher.isChromiumBrowser(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+
         if let el = axElement {
             // Capture the insertion start location BEFORE the write so the revert
             // path knows which UTF16 range to re-select later. The write path
@@ -681,8 +685,6 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             #if DEBUG
             print("[SwapPipeline] Step 4: AX write result = \(axResult)")
             #endif
-
-            let isChromium = layoutSwitcher.isChromiumBrowser(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
 
             switch axResult {
             case .success:
@@ -744,8 +746,7 @@ final class KeySwapApp: NSObject, NSApplicationDelegate {
             ) { [weak self] in
                 guard let self else { return }
                 self.layoutSwitcher.switchLayout(to: direction)
-                let isChromiumClipboard = self.layoutSwitcher.isChromiumBrowser(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
-                if fallbackUsed || isChromiumClipboard {
+                if fallbackUsed || isChromium {
                     let dirResult = self.layoutSwitcher.flipWritingDirection(to: direction)
                     self.announceDirectionFlip(dirResult, to: direction)
                 }

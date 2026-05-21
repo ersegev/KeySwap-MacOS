@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Spurious AX write success from Word's kAXValueAttribute path** — Word's note/comment panel accepts `kAXValueAttribute` writes, returns success, but silently ignores them. KeySwap now re-reads the value after writing and routes to the Cmd+V clipboard path if the value didn't change.
 
+- **Chromium direction flip now consistent across all swap paths** — The Chromium browser check was re-evaluated inside the async clipboard-only closure, so an app switch during a long paste could cause the direction flip to fire on the wrong app. Now captured once at pipeline start and used by all branches.
+
 ---
 
 ## [1.2.2.0] - 2026-05-06
