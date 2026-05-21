@@ -275,12 +275,56 @@ final class LayoutSwitcher {
             #if DEBUG
             print("[LayoutSwitcher] Word direction flip (\(commandName)): AppleScript error = \(error)")
             #endif
-            return .unavailable
+            // VBA macro fails in Word's note/comment panel context (error -1708).
+            // Fall back to the generic menu-bar AX approach — it traverses
+            // Word's actual menu bar and may find a Format > Writing Direction item
+            // that applies to the focused context instead of the document body.
+            return flipWritingDirectionViaMenu(to: direction)
         }
         #if DEBUG
         print("[LayoutSwitcher] Word direction flip (\(commandName)): ran")
         #endif
         return .flipped
+    }
+
+    /// Generic menu-bar AX traversal used as a fallback when the VBA approach
+    /// fails (e.g. focus is in a Word comment/note panel rather than the document).
+    private func flipWritingDirectionViaMenu(to direction: Direction) -> WritingDirectionResult {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return .unavailable }
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        var menuBarRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appEl, kAXMenuBarAttribute as CFString, &menuBarRef) == .success,
+              let menuBar = menuBarRef else { return .unavailable }
+
+        let targetSubstrings: [String]
+        switch direction {
+        case .hebrewToEnglish: targetSubstrings = ["Left to Right", "Left-to-Right"]
+        case .englishToHebrew: targetSubstrings = ["Right to Left", "Right-to-Left"]
+        }
+        let scopeTitles: Set<String> = ["Format", "Edit", "Writing Direction", "Paragraph", "Text", "Text Direction"]
+
+        guard let item = findMenuItem(
+            substrings: targetSubstrings,
+            under: menuBar as! AXUIElement,
+            depth: 0,
+            inScope: false,
+            scopeTitles: scopeTitles
+        ) else {
+            #if DEBUG
+            print("[LayoutSwitcher] Word menu fallback: no scoped match found")
+            #endif
+            return .unavailable
+        }
+
+        var markRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(item, kAXMenuItemMarkCharAttribute as CFString, &markRef)
+        if let mark = markRef as? String, !mark.isEmpty { return .alreadyAtTarget }
+
+        let err = AXUIElementPerformAction(item, kAXPressAction as CFString)
+        #if DEBUG
+        print("[LayoutSwitcher] Word menu fallback: pressed → err=\(err.rawValue)")
+        #endif
+        return err == .success ? .flipped : .unavailable
     }
 
     // MARK: - Chromium browser direction
