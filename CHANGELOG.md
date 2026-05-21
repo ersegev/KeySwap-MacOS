@@ -5,6 +5,22 @@ All notable changes to KeySwap for macOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2.4] - 2026-05-21
+
+### Fixed
+
+- **Swap now works in Microsoft Word note and comment panels** — Word's note/comment panel incorrectly reports both `kAXSelectedTextAttribute` and `kAXValueAttribute` as non-settable even though the field accepts keyboard input and paste. KeySwap now trusts the AX role (`AXTextArea`/`AXTextField`) over the broken settable flag and attempts the write anyway — falling back to Cmd+V paste if AX is rejected at write time. Previously the panel was treated as read-only and every swap attempt silently failed.
+
+- **Clipboard paste now reliably fires in Word note/comment panels** — The pasteboard change-count used to poll for write confirmation was captured *after* the write instead of before it. This meant the poll saw the post-write count and never detected a change, so the Cmd+V paste trigger never fired. Count is now captured before `clearContents()`.
+
+- **Clipboard fallback for fields with no `kAXValueAttribute`** — Fields that don't expose `kAXValueAttribute` (Word notes/comments, some sandboxed fields) caused the AX-value polling loop to compare `nil == nil` on every tick and never resolve. These fields now use a fixed 150 ms wait — generous enough for the paste to land, short enough to stay responsive.
+
+- **Writing direction in Word note/comment panels** — The VBA macro used to flip paragraph direction fails in Word's note/comment panel context (error −1708, wrong AppleScript context). KeySwap now falls back to a generic menu-bar AX traversal that finds the active "Format → Writing Direction" item regardless of focus context.
+
+- **Spurious AX write success from Word's kAXValueAttribute path** — Word's note/comment panel accepts `kAXValueAttribute` writes, returns success, but silently ignores them. KeySwap now re-reads the value after writing and routes to the Cmd+V clipboard path if the value didn't change.
+
+---
+
 ## [1.2.2.0] - 2026-05-06
 
 ### Fixed
